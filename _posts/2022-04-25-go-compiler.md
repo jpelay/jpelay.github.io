@@ -29,8 +29,8 @@ Esto tiene una desventaja, además de toda la sintaxis extra que estamos lanzand
 
 ```go
 for i := 0; i < 10; {
-		i++
-	}
+	i++
+}
 ```
 
 Compila a:
@@ -105,4 +105,131 @@ if len(p) >= 64 {
 ```
 
 Para solucionar esto cambiamos el token de `do` a `do_` usamos el comando `go generate` de nuevo e intentamos compilar de nuevo y ¡funciona! Por alguna razón Eli tuvo problemas con el hash de los tokens, pero es problable que haya tenido suerte con los tokens que agregué ya que su hash no choca con el de las otras keywords de go.
+
+### Análisis sintáctico
+Luego de convertir el código fuente en una cadena de tokens, el compilador hace el análisis sintáctico. Go usa un análizador sintáctico recursivo descendente bastante estándar. El parser (como también es conocido esta fase), va a leer la cadena de tokens y la convertirá en un árbol de sintaxis concreto (CST), que luego será manipulado en las siguientes fases de compilación y convertido en un AST. Este paso de un CST a un AST quedó de los primeros días del compilador cuando estaba escrito en C y luego fue convertido a Go.
+
+Lo siguiente que debemos hacer es agregar el nodo del CST correspondiente a nuestro bucle do-while:
+```go
+
+DoWhileStmt struct {
+	Cond Expr
+	Body *BlockStmt
+	stmt
+}
+	
+```
+ 
+Una sentencia do while luciria como:
+
+```go
+do_ {
+	<body>
+} <cond>;
+
+```
+
+Para hacer que go parsee la sentencia debemos ir hacia el archivo syntax/parser.go y agregar un nuevo caso en el `switch` de los tokens:
+
+``` go
+case _Do:
+	return p.doWhileStmt()
+```
+
+Y ahora sí agregamos la función encargada de parsear la sentencia:
+
+```go
+func (p *parser) doWhileStmt() Stmt {
+	if trace {
+		defer p.trace("doWhileStmt")()
+	}
+	
+	s := new(DoWhileStmt)
+	s.pos = p.pos()
+	// advancing the _Do token
+	p.next()
+	s.Body = p.blockStmt("dowhile clause")
+	_, s.Cond, _ = p.header(_While)
+	return s
+}
+```
+
+La función en sí es bastante sencilla, primero necesitamos avanzar el token `_Do` para que la función `blockStmt` parsee el cuerpo del bucle. Luego reutilizamos la función `header` que es usada por los bucles `for` y los `if`, y la modificamos un poco para que sea capaz de procesar los bucles do-while. En realidad solo necesitamos agregar un pequeño condicional para que no entrar en los casos extra de sentencias de inicialización y posteriores que sí usan los `for` y los `if`:
+
+```go
+if p.tok != _Semi {
+	// ...
+	init = p.simpleStmt(nil, keyword)
+	// ...
+}
+var condStmt SimpleStmt
+var semi struct {
+	pos Pos
+	lit string // valid if pos.IsKnown()
+}
+
+if p.tok != _Lbrace && keyword != _While {
+	// ...	
+} else {
+	condStmt = init
+	init = nil
+}
+// ...
+
+```
+
+Para poder imprimir el CST podemos agregar unos print de debug en la función `LoadPackage` del paquete noder. Esta función es la que se encarga de invocar al parser:
+
+```go
+p.file, _ = syntax.Parse(fbase, f, p.error, p.pragma, mode) // errors are tracked via p.error
+if len(os.Getenv("FOO")) > 0 {
+	fmt.Printf("FOO='%s'\n", os.Getenv("FOO"))
+	fmt.Println("Dumping", p.file.PkgName)
+	syntax.Fdump(os.Stdout, p.file)
+}
+```
+
+Si queremos mostrar el CST de este programa:
+
+```go
+package main
+
+func main() {
+	i := 1
+	do_ {
+		i++
+	} while i < 10;
+}
+```
+
+Lo compilamos usando este comando:
+
+```
+FOO=FOO <raiz de la carpeta del proyecto>/go/bin run dowhile.go
+```
+
+Y ¡exito! Ya podemos parsear bucles do-while:
+
+```
+    25  .  .  .  .  .  1: *syntax.DoWhileStmt {
+    26  .  .  .  .  .  .  Cond: *syntax.Operation {
+    27  .  .  .  .  .  .  .  Op: <
+    28  .  .  .  .  .  .  .  X: i @ ./dowhile.go:7:10
+    29  .  .  .  .  .  .  .  Y: *syntax.BasicLit {
+    30  .  .  .  .  .  .  .  .  Value: "10"
+    31  .  .  .  .  .  .  .  .  Kind: 0
+    32  .  .  .  .  .  .  .  .  Bad: false
+    33  .  .  .  .  .  .  .  }
+    34  .  .  .  .  .  .  }
+    35  .  .  .  .  .  .  Body: *syntax.BlockStmt {
+    36  .  .  .  .  .  .  .  List: []syntax.Stmt (1 entries) {
+    37  .  .  .  .  .  .  .  .  0: *syntax.AssignStmt {
+    38  .  .  .  .  .  .  .  .  .  Op: +
+    39  .  .  .  .  .  .  .  .  .  Lhs: i @ ./dowhile.go:6:3
+    40  .  .  .  .  .  .  .  .  .  Rhs: nil
+    41  .  .  .  .  .  .  .  .  }
+    42  .  .  .  .  .  .  .  }
+    43  .  .  .  .  .  .  .  Rbrace: syntax.Pos {}
+    44  .  .  .  .  .  .  }
+```
 
