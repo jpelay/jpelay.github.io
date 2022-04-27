@@ -6,16 +6,17 @@ Hace un tiempo me encontré con este [magnífico post](https://eli.thegreenplace
 
 Go es un lenguaje minimalista que sólo tiene un tipo de bucle, el cual puede servir de varias formas dependiendo de sus componentes:
 
-```go
+{% highlight go %}
 for Inic; Cond; Post {
     Cuerpo
 }
-```
+{% endhighlight %}
+
 Cada uno de los componentes son opcionales, pudiendo hacer bucles while, o infitos usando solo una palabra clave. La simpleza de Go es genial, pero ¿qué tal si queremos hacer un bucle do-while? Una forma de hacerlo usando solo la sintaxis actual del lenguaje es la siguiente:
 
 ```go
 i := true
-for i {
+for {
     if algunaCondicion {
         i = false
     }
