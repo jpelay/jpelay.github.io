@@ -6,12 +6,11 @@ Hace un tiempo me encontré con este [magnífico post](https://eli.thegreenplace
 
 Go es un lenguaje minimalista que sólo tiene un tipo de bucle, el cual puede servir de varias formas dependiendo de sus componentes:
 
-{% highlight go %}
+```go
 for Inic; Cond; Post {
     Cuerpo
 }
-{% endhighlight %}
-
+```
 Cada uno de los componentes son opcionales, pudiendo hacer bucles while, o infitos usando solo una palabra clave. La simpleza de Go es genial, pero ¿qué tal si queremos hacer un bucle do-while? Una forma de hacerlo usando solo la sintaxis actual del lenguaje es la siguiente:
 
 ```go
@@ -209,7 +208,7 @@ Lo compilamos usando este comando:
 FOO=FOO <raiz de la carpeta del proyecto>/go/bin run dowhile.go
 ```
 
-Y ¡exito! Ya podemos parsear bucles do-while:
+Y ¡éxito! Ya podemos parsear bucles do-while:
 
 ```
     25  .  .  .  .  .  1: *syntax.DoWhileStmt {
@@ -232,5 +231,153 @@ Y ¡exito! Ya podemos parsear bucles do-while:
     42  .  .  .  .  .  .  .  }
     43  .  .  .  .  .  .  .  Rbrace: syntax.Pos {}
     44  .  .  .  .  .  .  }
+```
+
+### Creando el árbol de sintaxis abstracto
+La siguiente fase de compilación involucra transformar el árbol generado por el paquete syntax a otra que es entendida por las étapas posteriores, que involucran el checado de tipos, las optimizaciones y generación de código. Según los autores de go este paso puede ser refactorizado en el futuro, pero aún es necesario.
+
+La definición de los nodos del árbol de sintaxis abstracto (AST) están definidos en el paquete ir, que asumo significa *intermediate representation* o representación intermedia. Anteriormente el compilador usaba un tipo de nodo genérico, pero posterioremente crearon una interfaz génerica y le dieron a cada constructo de la gramática su propio nodo. Es por esto que no podemos hacer una traducción 1:1 del post de Eli, la versión que él maneja en ese post es antigua y a partir de aquí las divergencias se hacen notables.
+
+Lo primero que debemos hacer es añadir el código del operador que servirá para identificar nuestros nodos. Estos códigos se encuentran definidos en ir/node.go:
+
+```go
+OFORUNTIL
+ODOWHILE // do_ { Body } while Cond;
+OGOTO // goto Label
+OIF // if Init; Cond { Then } else { Else }
+OLABEL // Label:
+OGO // go Call
+```
+
+Estos códigos de operación funcionan de manera similar a los tokens que vimos anteriormente, así que de nuevo debemos ejecutar el comando stringer dentro de la carpeta ir:
+
+```bash
+go generate node.go
+```
+
+Este comando va a generar el archivo op_string.go que contiene un arreglo con el nombre de los operadores.
+
+Luego de agregar el tipo de operador, podemos agregar ahora sí nuestra definición del bucle. Esta la podemos tomar prestada de la que usa el bucle `for` y quitar las partes que no nos interesan. Además debemos definir dos operaciones que deben definir todos los nodos. Esta definición la podemos agregar en el archivo ir/stmt.go: 
+
+```go
+// A DoWhile is loop with the structure do_ { Body } while Cond;
+// where the Body is guaranteed to be executed at least once
+type DoWhileStmt struct {
+	miniStmt
+	Label *types.Sym
+	Cond Node
+	Body Nodes
+	HasBreak bool
+}
+
+func NewDoWhileStmt(pos src.XPos, cond Node, body []Node) *DoWhileStmt {
+	n := &DoWhileStmt{Cond: cond}
+	n.pos = pos
+	n.op = ODOWHILE
+	n.Body = body
+	return n
+}
+ 
+func (n *DoWhileStmt) SetOp(op Op) {
+	if op != ODOWHILE {
+		panic(n.no("SetOp " + op.String()))
+	}
+	n.op = op
+}
+```
+
+Al principio del archivo hay un `switch` que decide que tipo de nodo de AST crear dependiendo del nodo del CST que esté recorriendo en ese momento, así que lo agregamos:
+
+```go
+case *syntax.IfStmt:
+	return g.ifStmt(stmt)
+case *syntax.ForStmt:
+	return g.forStmt(stmt)
+case *syntax.DoWhileStmt:
+	return g.doWhileStmt(stmt)
+```
+
+Y también agregamos la función que transformará uno en el otro:
+
+```go
+func (g *irgen) doWhileStmt(stmt *syntax.DoWhileStmt) ir.Node {
+	return ir.NewDoWhileStmt(g.pos(stmt), g.expr(stmt.Cond), g.blockStmt(stmt.Body))
+}
+```
+
+Si tratamos de compilar esto, nos genera este error. 
+
+```
+/home/capybara/repos/go/src/cmd/compile/internal/typecheck/stmt.go:282: cannot use n (variable of type *ir.DoWhileStmt) as type ir.Node in return statement:
+	*ir.DoWhileStmt does not implement ir.Node (missing Format method)
+/home/capybara/repos/go/src/cmd/compile/internal/typecheck/typecheck.go:787: impossible type assertion: n.(*ir.DoWhileStmt)
+	*ir.DoWhileStmt does not implement ir.Node (missing Format method)
+go tool dist: FAILED: /usr/local/go/bin/go install -gcflags=-l -tags=math_big_pure_go compiler_bootstrap bootstrap/cmd/...: exit status 2
+```
+
+Esto es **un paso común a partir de este momento**. Compilar, obtener el error, ir hacia el sitio que nos apunta y hacer una búsqueda en el código a ver qué nos falta. Este proceso de familiarizarme con una base de código extraña considero fue la parte más provechosa de este proyecto. Este error en particular nos dice que no estamos implementando un método de la interfaz `ir.Node`. Éstas definiciones se encuentran en el archivo ir/node_gen.go. Este archivo es generado automáticamente por el archivo ir/mknode.go de la siguiente forma:
+
+```bash
+go run mknode.go
+```
+
+Pero me retorna un error con los paquetes y no pude instalarlos. Sin embargo, al ser un archivo que sólo genera código, lo podemos agregar manualmente al archivo que este programa genera ir/node_gen.go:
+
+```go
+func (n *DoWhileStmt) Format(s fmt.State, verb rune) { fmtNode(n, s, verb) }
+func (n *DoWhileStmt) copy() Node {
+	c := *n
+	// c.init = copyNodes(c.init)
+	c.Body = copyNodes(c.Body)
+	return &c
+}
+func (n *DoWhileStmt) doChildren(do func(Node) bool) bool {
+	if n.Cond != nil && do(n.Cond) {
+		return true
+	}
+	if doNodes(n.Body, do) {
+		return true
+	}
+	return false
+}
+func (n *DoWhileStmt) editChildren(edit func(Node) Node) {
+	if n.Cond != nil {
+		n.Cond = edit(n.Cond).(Node)
+	}
+	editNodes(n.Body, edit)
+}
+```
+
+El propósito de mknode.go era precisamente no hacer eso, pero al ser esto un ejercicio de una sola vez no hay problema.
+
+### Chequeo de tipos
+La siguiente fase del compilador es hacer un chequeo de los tipos. En el caso de bucle do-while es simple. Sólo debemos comprobar que la condición es una expresión de tipo lógico, y luego comprobar el cuerpo. Esta primera étapa de chequeo de tipos se hace en el paquete typecheck. Lo primero que debemos hacer es agregar la función encargada de chequear al bucle `do-while`:
+
+```go
+// tcDoWhile typechecks an ODOWHILE node.
+
+func tcDoWhile(n *ir.DoWhileStmt) ir.Node {
+	n.Cond = Expr(n.Cond)
+	n.Cond = DefaultLit(n.Cond, nil)
+	if n.Cond != nil {
+		t := n.Cond.Type()
+		if t != nil && !t.IsBoolean() {
+			base.Errorf("non-bool %L used as do-while condition", n.Cond)
+		}
+	}
+	Stmts(n.Body)
+	return n
+}
+```
+
+Es fácil ver también como go va generando los errores en caso de que alguna de los casos de estás funciones fallen Para poder invocar la función que acabamos de agregar, de nuevo debemos agregarla en un `switch` que se encuentra en el archivo typecheck/typecheck.go:
+
+```go
+case ir.OFOR, ir.OFORUNTIL:
+	n := n.(*ir.ForStmt)
+	return tcFor(n)
+case ir.ODOWHILE:
+	n := n.(*ir.DoWhileStmt)
+	return tcDoWhile(n)
 ```
 
