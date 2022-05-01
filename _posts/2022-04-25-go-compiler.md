@@ -471,4 +471,86 @@ case ir.ODOWHILE:
 ```
 
 #### Reescritura del AST
+Una de las últimas fases del frontend del compilador antes de inicar con las fases del backend como la transformación a SSA. Esta fase se encarga de transformar el AST para hacer más sencilla su transformación a SSA. Por ejemplo, una de sus transformaciones incluye las sentencias `range`, las cuales son convertidas en formas más simples. Otro ejemplo es la reescritura de la función `append` de los `slices`, con el fin de detectar detectar cualquier efecto secundario antes de hacer la adición a la slice.
 
+Para que el compilador recorra nuestro nodo en esta fase, agreamos otro caso en el switch del archivo walk/stmt.go y añadimos la función correspondiente:
+
+```go
+case ir.ODOWHILE:
+	n := n.(*ir.DoWhileStmt)
+	return walkDoWhile(n)
+```
+
+```go
+//walkDoWhile walks an ODOWHILE node.
+func walkDoWhile(n *ir.DoWhileStmt) ir.Node {
+	walkStmtList(n.Body)
+	if n.Cond != nil {
+		init := ir.TakeInit(n.Cond)
+		walkStmtList(init)
+		n.Cond = walkExpr(n.Cond, &init)
+		n.Cond = ir.InitExpr(init, n.Cond)
+	}
+	return n
+}
+```
+
+### Generación de SSA
+Antes de generar el código máquina, Go primero genera algo llamado [SSA](https://en.wikipedia.org/wiki/Static_single_assignment_form). En resumen el SSA es una forma de reprentación intermedia en donde cada variable es asignada sólo una vez. La ventaja del SSA es que permite aplicar optimizaciones mucho más facilmente, tales como eliminación de código muerto, reordenamiento de bucles, eliminación de comprabaciones de nil. El SSA luego es transformado en el código ensamblador de cada arquitectura, esto simplifica de soportar la compilación a distintas arquitecturas. Un resumen acerca del SSA puedes encontrarlo en el [README.md del paquete ssa](https://github.com/golang/go/blob/master/src/cmd/compile/internal/ssa/README.md) si quieres más detalles acerca de esta representación.
+
+La generación de SSA de go funciona teniendo bloques conectados entre sí formando un grafo de control de flujo. Para generar el SSA de nuestra sentencia `do-while` debemos ir hacia el archivo ssa.go del paquete ssagen y agregar el siguiente código en el `switch` dentro de la función `stmt`:
+
+```go
+case ir.ODOWHILE:
+		n := n.(*ir.DoWhileStmt)
+		bCond := s.f.NewBlock(ssa.BlockPlain)
+		bBody := s.f.NewBlock(ssa.BlockPlain)
+		bEnd := s.f.NewBlock(ssa.BlockPlain)
+
+		bBody.Pos = n.Pos()
+
+		// First jump to body
+		b := s.endBlock()
+		b.AddEdgeTo(bBody)
+
+		// set up for continue/break in body
+		prevContinue := s.continueTo
+		prevBreak := s.breakTo
+		s.continueTo = bCond
+		s.breakTo = bEnd
+		var lab *ssaLabel
+		if sym := n.Label; sym != nil {
+			// labeled for loop
+			lab = s.label(sym)
+			lab.continueTarget = bCond
+			lab.breakTarget = bEnd
+		}
+
+		// generate body
+		s.startBlock(bBody)
+		s.stmtList(n.Body)
+
+		// tear down continue/break
+		s.continueTo = prevContinue
+		s.breakTo = prevBreak
+		if lab != nil {
+			lab.continueTarget = nil
+			lab.breakTarget = nil
+		}
+		b = s.endBlock()
+		b.AddEdgeTo(bCond)
+		// generate code to test condition
+		s.startBlock(bCond)
+		if n.Cond != nil {
+			s.condBranch(n.Cond, bBody, bEnd, 1)
+		} else {
+			b := s.endBlock()
+			b.Kind = ssa.BlockPlain
+			b.AddEdgeTo(bBody)
+		}
+		s.startBlock(bEnd)
+```
+
+Primero inicializamos cada uno de los bloques que componen la sentencia `do-while`: el condicional, el cuerpo, y el bloque que representa el final de la sentencia. Debido a que podemos garantizar que el bucle se ejecuta una vez podemos saltar directamente al cuerpo en lugar de a la condición como en los bucles `for`. Esto lo hacemos agregando un vértice (salto) desde el bloque anterior hacia el cuerpo.  Luego de agregar un poco de lógica para los `break` y `continue` podemos generar el cuerpo de la función. Y por último agregamos un salto desde el cuerpo hacia la condición y luego, dependiendo de si la condición es `nil` nos encargamos de ella, de lo contrario hacemos un ciclo de vuelta hacia el cuerpo de la sentencia.
+
+### Conclusiones
