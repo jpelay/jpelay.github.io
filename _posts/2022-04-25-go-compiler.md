@@ -11,7 +11,7 @@ for Inic; Cond; Post {
     Cuerpo
 }
 ```
-Cada uno de los componentes son opcionales, pudiendo hacer bucles while, o infitos usando solo una palabra clave. La simpleza de Go es genial, pero ¿qué tal si queremos hacer un bucle do-while? Una forma de hacerlo usando solo la sintaxis actual del lenguaje es la siguiente:
+Cada uno de los componentes son op, pudiendo hacer bucles while, o infitos usando solo una palabra clave. La simpleza de Go es genial, pero ¿qué tal si queremos hacer un bucle do-while? Una forma de hacerlo usando solo la sintaxis actual del lenguaje es la siguiente:
 
 ```go
 i := true
@@ -233,6 +233,73 @@ Y ¡éxito! Ya podemos parsear bucles do-while:
     44  .  .  .  .  .  .  }
 ```
 
+
+### Chequeo de tipos
+
+La siguiente fase del compilador es hacer un chequeo de los tipos. Esta fase se encarga de que los tipos usando en las sentencias sean correctos, por ejemplo, que el dato asignado a una variable sea el mismo de la variable (o compatible), o que la variable condicional de los `if` sean de tipo booleano. El chequeo de tipos de Go también hace algunas cosas extras, como apunta [Eli](https://eli.thegreenplace.net/2019/go-compiler-internals-adding-a-new-statement-to-go-part-1/): enlazar los identificadores a sus declaraciones, calcular las constantes de tiempo de compilación, inferencia de tipos, etc.
+
+La fase de chqueo de tipos se hace justo antes de la generación del AST. La función que se encarga de llamar al chequeador de tipos se encuentra en el paquete noder en el archivo irgen.go:
+
+```go
+// check2 type checks a Go package using types2, and then generates IR
+// using the results.
+func check2(noders []*noder) {
+	m, pkg, info := checkFiles(noders)
+
+	g := irgen{
+		target: typecheck.Target,
+		self: pkg,
+		info: info,
+		posMap: m,
+		objs: make(map[types2.Object]*ir.Name),
+		typs: make(map[types2.Type]*types.Type),
+	}
+	g.generate(noders)
+}
+```
+
+Al hacerse antes de la transformación al AST el chequeo de tipos en Go funciona sobre el CST que se generó en la sección de análisis sintáctico. Para agregar el caso del chequeo de tipos para el bucle `do-while` seguimos el caso del bucle `for` y agregamos este código en el archivo stmt.go del paquete types2:
+
+```go
+case *syntax.DoWhileStmt:
+	inner |= breakOk | continueOk
+	check.openScope(s, "do_")
+	defer check.closeScope()
+	
+	if s.Cond != nil {
+		var x operand
+		check.expr(&x, s.Cond)
+		if x.mode != invalid && !allBoolean(x.typ) {
+			check.error(s.Cond, "non-boolean condition in do-while statement")
+			}
+	}  
+	
+	check.stmt(inner, s.Body)  
+}
+```
+
+Primero debemos comprobar que la expresión que se encuentra en el condicional del bucle sea de tipo booleano, y luego llamamaos a la función que va a comprobar el cuerpo del bucle. No tenemos mucho trabajo acá, puesto que nuestro bucle `do-while` es bastante simple.
+
+Ahora, si buscas en el código del compilador de Go por otras funciones que hagan chequeo de tipos, econtrarás que existe un paquete llamado typechek que actúa sobre el AST y también hace un chequeo de tipos. Las funciones que chequean las funciones en este paquete son muy similares a las del paquete types2. Mi primera teoría era que el compilador primero chequeaba el CST antes de optimizaciones, y de nuevo luego de aplicar las optimizaciones. Pero estaba equivocado. En realidad este paquete es llamado cuando el compilador genera código durante su ejecució, esté código luego debe ser chequeado y de allí la existencia de este paquete (aún así puedo estar equivocado respecto a esto, si tienes algún comentario al respecto puedes agregar un issue en el [repositorio de este blog](github.com/jpelay/jpelay.github.io/) o enviarme un correo a pelayjesus [at] gmail.com).
+
+Para propósitos ilustrativos, aquí dejo como quedaría el caso del bucle `do-while` en este paquete:
+
+```go
+// tcDoWhile typechecks an ODOWHILE node.
+func tcDoWhile(n *ir.DoWhileStmt) ir.Node {
+	n.Cond = Expr(n.Cond)
+	n.Cond = DefaultLit(n.Cond, nil)
+	if n.Cond != nil {
+		t := n.Cond.Type()
+		if t != nil && !t.IsBoolean() {
+			base.Errorf("non-bool %L used as do-while condition", n.Cond)
+		}
+	}
+	Stmts(n.Body)
+	return n
+}
+```
+
 ### Creando el árbol de sintaxis abstracto
 La siguiente fase de compilación involucra transformar el árbol generado por el paquete syntax a otra que es entendida por las étapas posteriores, que involucran el checado de tipos, las optimizaciones y generación de código. Según los autores de go este paso puede ser refactorizado en el futuro, pero aún es necesario.
 
@@ -350,34 +417,58 @@ func (n *DoWhileStmt) editChildren(edit func(Node) Node) {
 
 El propósito de mknode.go era precisamente no hacer eso, pero al ser esto un ejercicio de una sola vez no hay problema.
 
-### Chequeo de tipos
-La siguiente fase del compilador es hacer un chequeo de los tipos. En el caso de bucle do-while es simple. Sólo debemos comprobar que la condición es una expresión de tipo lógico, y luego comprobar el cuerpo. Esta primera étapa de chequeo de tipos se hace en el paquete typecheck. Lo primero que debemos hacer es agregar la función encargada de chequear al bucle `do-while`:
+Luego de la generación del AST hay una fase que extra que vuelve recorrer el árbol mediante un recorrido preorden con el fin de chequear de nuevo por cualquier inconsistencia en el checado de tipos. Sólo debemos agregar el caso que recorre este nodo del árbol en el archivo syntax/walk.go:
 
 ```go
-// tcDoWhile typechecks an ODOWHILE node.
-
-func tcDoWhile(n *ir.DoWhileStmt) ir.Node {
-	n.Cond = Expr(n.Cond)
-	n.Cond = DefaultLit(n.Cond, nil)
+case *DoWhileStmt:	
 	if n.Cond != nil {
-		t := n.Cond.Type()
-		if t != nil && !t.IsBoolean() {
-			base.Errorf("non-bool %L used as do-while condition", n.Cond)
-		}
+		w.node(n.Cond)
 	}
-	Stmts(n.Body)
+	w.node(n.Body)
+```
+
+### Análisis y reesccritura del AST
+Luego de que el AST ha sido construido, el compilador se encarga de optimizarlo, transformarlo y analizarlo. 
+
+#### Análisis de escape
+
+Una de estas fases es lo que Go denomina *análisis de escape*, este proceso se encarga de analizar donde las variables se deben alojar, si en la pila (*stack*) o en el montículo (*heap*). Para que el compilador pueda ejecutar el análisis de escape en nuestra sentencia, debemos agregar el caso en el archivo escape/stmt.go, de nuevo, guíandonos del caso del bucle `for`:
+
+```go
+case ir.ODOWHILE:
+	n := n.(*ir.DoWhileStmt)
+	e.loopDepth++
+	e.discard(n.Cond)
+	e.block(n.Body)
+	e.loopDepth--
+```
+
+#### Reordenamiento del AST
+Luego del análisis de escape, Go se encarga de separar las sentencias con el fin de hacer cumplir el orden de evaluación. Esto hace que luego reescribir el árbol sea más sencillo porque puede reordenar lo que él quiera dentro de una expresión. Un ejemplo sería reescribir `f[i] /= 2` en `f[i] = f[i] / 2`, divide asignaciones múltiples en varias asignaciones simplesm, para esto puede introducir temporales.
+
+Este reordenamiento funciona por sentencia, así que debemos agregar la función que camina un nodo `do-while` en el archivo walk/order.go
+
+```go
+//walkDoWhile walks an ODOWHILE node.
+func walkDoWhile(n *ir.DoWhileStmt) ir.Node {
+	walkStmtList(n.Body)
+	if n.Cond != nil {
+		init := ir.TakeInit(n.Cond)
+		walkStmtList(init)
+		n.Cond = walkExpr(n.Cond, &init)
+		n.Cond = ir.InitExpr(init, n.Cond)
+	}
 	return n
 }
 ```
 
-Es fácil ver también como go va generando los errores en caso de que alguna de los casos de estás funciones fallen Para poder invocar la función que acabamos de agregar, de nuevo debemos agregarla en un `switch` que se encuentra en el archivo typecheck/typecheck.go:
+También agregamos un nuevo caso en el `switch` del principio del archivo:
 
 ```go
-case ir.OFOR, ir.OFORUNTIL:
-	n := n.(*ir.ForStmt)
-	return tcFor(n)
 case ir.ODOWHILE:
 	n := n.(*ir.DoWhileStmt)
-	return tcDoWhile(n)
+	return walkDoWhile(n)
 ```
+
+#### Reescritura del AST
 
