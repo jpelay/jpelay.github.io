@@ -2,7 +2,7 @@
 
 Hace un tiempo me encontré con este [magnífico post](https://eli.thegreenplace.net/2019/go-compiler-internals-adding-a-new-statement-to-go-part-1/) de Eli Benderksy el cual trata acerca de agregar un nuevo tipo de sentencia a Go. Este es un lenguaje que casi no conozco, así que meterme de lleno en el compilador me pareció una excelente idea para conocer un poco más del lenguaje y de cómo funciona un compilador usado en producción. Sin embargo, el post de Eli es viejo y varios de los pasos listados en él se encuentran desfasados, así que este es mi intento de retomar su trabajo y dar los pasos actuales de cómo funciona el compilador y explicar un poco acerca de su estructura.
 
-### Lo qué haremos
+### Lo que haremos
 Go es un lenguaje minimalista y solamente tiene una palabra reservada para señalar un bucle, el cual puede servir de varias formas dependiendo de sus componentes, los cuales son opcionales, pudiendo hacer bucles `for`, `while` e infinitos usando solo una palabra clave:
 
 ```go
@@ -34,7 +34,7 @@ main_pc2:
 	RET
 ```
 
-Lo que podemos ver en este código es que Go, incluso no teniendo una sintaxis dedicada a los bucles `do-while` sí sabe interpretar nuestras intenciones cuando hacemos uno. Como vemos el código del bucle externo fue removido, no hay un salto a la condición, pasa directo al cuerpo el cuál se garantiza que se ejecute al menos una vez.
+Lo que podemos ver en este código es que Go, incluso no teniendo una sintaxis dedicada a los bucles `do-while` sí sabe interpretar nuestras intenciones cuando hacemos uno. Como vemos el código del bucle externo fue removido, no hay un salto a la condición, pasa directo al cuerpo el cual se garantiza que se ejecute al menos una vez.
 
 Nuestra tarea es emular este comportamiento añadiendo los bucles `do-while` directamente, y siguiendo todo el proceso del compilador hasta la genración del código máquina para emular ese comportamiento. Un bucle de este tipo luciría de la siguiente manera:
 
@@ -221,7 +221,7 @@ Y ¡éxito! Ya podemos parsear bucles do-while:
 
 La siguiente fase del compilador es hacer un chequeo de los tipos. Esta fase se encarga de que los tipos usados en las sentencias sean correctos, por ejemplo, que el dato asignado a una variable sea el mismo de la variable (o [compatible](https://go.dev/ref/spec#Assignability)), que la variable condicional de los `if` sean de tipo booleano, etc. El chequeo de tipos de Go también hace algunas cosas extras, como apunta [Eli](https://eli.thegreenplace.net/2019/go-compiler-internals-adding-a-new-statement-to-go-part-1/): enlazar los identificadores a sus declaraciones, calcular las constantes de tiempo de compilación, inferencia de tipos, etc.
 
-La fase de chqueo de tipos se hace justo antes de la generación del AST. La función que se encarga de llamar al chequeador de tipos se encuentra en el paquete `noder` en el archivo `irgen.go`:
+La fase de chequeo de tipos se hace justo antes de la generación del AST. La función que se encarga de llamar al chequeador de tipos se encuentra en el paquete `noder` en el archivo `irgen.go`:
 
 ```go
 // check2 type checks a Go package using types2, and then generates IR
@@ -455,7 +455,7 @@ case ir.ODOWHILE:
 #### Reescritura del AST
 Una de las últimas fases del frontend del compilador antes de inicar con las fases del backend como la transformación a SSA. Esta fase se encarga de transformar el AST para hacer más sencilla su transformación a SSA. Por ejemplo, una de sus transformaciones incluye las sentencias `range`, las cuales son convertidas en formas más simples. Otro ejemplo es la reescritura de la función `append` de los `slices`, con el fin de detectar detectar cualquier efecto secundario antes de hacer la adición a la slice.
 
-Para que el compilador recorra nuestro nodo en esta fase, agreamos otro caso en el switch del archivo `walk/stmt.go` y añadimos la función correspondiente:
+Para que el compilador recorra nuestro nodo en esta fase, agregamos otro caso en el switch del archivo `walk/stmt.go` y añadimos la función correspondiente:
 
 ```go
 case ir.ODOWHILE:
